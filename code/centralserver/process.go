@@ -1,0 +1,496 @@
+package centralserver
+
+import (
+	"fmt"
+	"reflect"
+	"time"
+
+	"github.com/awcullen/opcua/server"
+	"github.com/awcullen/opcua/ua"
+)
+
+type ProcessConfig struct {
+	Host        string
+	GeneralPort int
+	SCADAPort   int
+	DemoMode    bool
+}
+
+type Process struct {
+	Config  ProcessConfig
+	State   *CentralServerState
+	General *RuntimeOPCUAServer
+	SCADA   *RuntimeOPCUAServer
+
+	generalNodes map[string]string
+	scadaNodes   map[string]string
+	methodNodes  map[string]string
+	onEnroll     func(EnrollmentContext)
+	onIdentify   func(IdentifyContext)
+	stopCh       chan struct{}
+}
+
+func NewProcess(cfg ProcessConfig) *Process {
+	return &Process{
+		Config:       cfg,
+		State:        NewCentralServerState(),
+		General:      NewRuntimeOPCUAServer(ServerSettings{Host: cfg.Host, Port: cfg.GeneralPort}),
+		SCADA:        NewRuntimeOPCUAServer(ServerSettings{Host: cfg.Host, Port: cfg.SCADAPort}),
+		generalNodes: map[string]string{},
+		scadaNodes:   map[string]string{},
+		methodNodes:  map[string]string{},
+		onEnroll:     func(EnrollmentContext) {},
+		onIdentify:   func(IdentifyContext) {},
+		stopCh:       make(chan struct{}),
+	}
+}
+
+func (p *Process) Start() error {
+	if p.Config.DemoMode {
+		SeedGeneralServerDemoMode(p.State, GeneralServerDemoConfig{Enabled: true, SiteID: "demo"})
+	}
+
+	if err := p.General.Start(); err != nil {
+		return err
+	}
+	if err := p.SCADA.Start(); err != nil {
+		p.General.Stop()
+		return err
+	}
+
+	if err := p.setupGeneralNodes(); err != nil {
+		p.Stop()
+		return err
+	}
+	if err := p.setupSCADANodes(); err != nil {
+		p.Stop()
+		return err
+	}
+
+	if err := p.publishSnapshot(); err != nil {
+		p.Stop()
+		return err
+	}
+
+	go p.run()
+	return nil
+}
+
+func (p *Process) Stop() {
+	select {
+	case <-p.stopCh:
+	default:
+		close(p.stopCh)
+	}
+	p.SCADA.Stop()
+	p.General.Stop()
+}
+
+func (p *Process) run() {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			if p.Config.DemoMode {
+				StepGeneralServerDemoMode(p.State, time.Now().UTC())
+			}
+			_ = p.publishSnapshot()
+		case <-p.stopCh:
+			return
+		}
+	}
+}
+
+func (p *Process) setupGeneralNodes() error {
+	if err := p.General.AddFolderNode("Methods", "Methods", "i=85"); err != nil {
+		return err
+	}
+	if err := p.General.AddFolderNode("Backend", "Backend", "i=85"); err != nil {
+		return err
+	}
+	if err := p.installMethods(); err != nil {
+		return err
+	}
+	groups := []string{
+		"Compressors",
+		"CoolmarkModules",
+		"SmartSwitches",
+		"StorageModules",
+		"SupplyConnectionSkids",
+	}
+	for _, group := range groups {
+		if err := p.General.AddFolderNode(group, group, "ns=1;s=Backend"); err != nil {
+			return err
+		}
+		itemsNode, err := p.General.AddValueNode("Items", group, []string{})
+		if err != nil {
+			return err
+		}
+		countNode, err := p.General.AddValueNode("Count", group, int32(0))
+		if err != nil {
+			return err
+		}
+		itemsFolder := group + "_Items"
+		if err := p.General.AddFolderNode(itemsFolder, "Elements", "ns=1;s="+group); err != nil {
+			return err
+		}
+		p.generalNodes[group+".Items"] = itemsNode
+		p.generalNodes[group+".Count"] = countNode
+		p.generalNodes[group+".Folder"] = itemsFolder
+	}
+	lastUpdateNode, err := p.General.AddValueNode("LastUpdateUTC", "Backend", "")
+	if err != nil {
+		return err
+	}
+	p.generalNodes["Backend.LastUpdateUTC"] = lastUpdateNode
+
+	if err := p.General.AddFolderNode("BackupEnrollment", "BackupEnrollment", "ns=1;s=Backend"); err != nil {
+		return err
+	}
+	backupDataNode, err := p.General.AddValueNode("Data", "BackupEnrollment", BackupEnrollmentState{})
+	if err != nil {
+		return err
+	}
+	p.generalNodes["BackupEnrollment.Data"] = backupDataNode
+
+	backupFieldDefaults := map[string]any{
+		"SerialNumber":  uint32(0),
+		"ModuleType":    uint16(0),
+		"VendorID":      uint16(0),
+		"ArrayName":     "",
+		"Index":         int32(-1),
+		"Applied":       false,
+		"LastMethod":    "",
+		"LastUpdateUTC": "",
+	}
+	for field, initVal := range backupFieldDefaults {
+		nodeID, nodeErr := p.General.AddValueNode(field, "BackupEnrollment", initVal)
+		if nodeErr != nil {
+			return nodeErr
+		}
+		p.generalNodes["BackupEnrollment."+field] = nodeID
+	}
+	return nil
+}
+
+func (p *Process) setupSCADANodes() error {
+	if err := p.SCADA.AddFolderNode("SCADA", "SCADA", "i=85"); err != nil {
+		return err
+	}
+	groups := []string{
+		"Compressors",
+		"StorageUnits",
+		"Dispensers",
+		"Coolers",
+	}
+	for _, group := range groups {
+		if err := p.SCADA.AddFolderNode(group, group, "ns=1;s=SCADA"); err != nil {
+			return err
+		}
+		itemsNode, err := p.SCADA.AddValueNode("Items", group, []string{})
+		if err != nil {
+			return err
+		}
+		countNode, err := p.SCADA.AddValueNode("Count", group, int32(0))
+		if err != nil {
+			return err
+		}
+		itemsFolder := group + "_Items"
+		if err := p.SCADA.AddFolderNode(itemsFolder, "Elements", "ns=1;s="+group); err != nil {
+			return err
+		}
+		p.scadaNodes[group+".Items"] = itemsNode
+		p.scadaNodes[group+".Count"] = countNode
+		p.scadaNodes[group+".Folder"] = itemsFolder
+	}
+	lastUpdateNode, err := p.SCADA.AddValueNode("LastUpdateUTC", "SCADA", "")
+	if err != nil {
+		return err
+	}
+	p.scadaNodes["SCADA.LastUpdateUTC"] = lastUpdateNode
+	return nil
+}
+
+func (p *Process) publishSnapshot() error {
+	general := &GeneralOPCUAServerState{}
+	scada := &CustomerSCADAState{}
+
+	ForwardToGeneralOPCUA(p.State, general)
+	ForwardToCustomerSCADA(p.State, scada)
+
+	generalValues := map[string]struct {
+		count int
+		items any
+	}{
+		"Compressors":           {count: len(general.Plant.Compressors), items: general.Plant.Compressors},
+		"CoolmarkModules":       {count: len(general.Plant.CoolmarkModules), items: general.Plant.CoolmarkModules},
+		"SmartSwitches":         {count: len(general.Plant.SmartSwitches), items: general.Plant.SmartSwitches},
+		"StorageModules":        {count: len(general.Plant.StorageModules), items: general.Plant.StorageModules},
+		"SupplyConnectionSkids": {count: len(general.Plant.SupplyConnectionSkids), items: general.Plant.SupplyConnectionSkids},
+	}
+	for group, value := range generalValues {
+		if err := p.General.SetNodeValue(p.generalNodes[group+".Items"], value.items); err != nil {
+			return err
+		}
+		if err := p.General.SetNodeValue(p.generalNodes[group+".Count"], int32(value.count)); err != nil {
+			return err
+		}
+		if err := p.syncElementNodes(p.General, p.generalNodes[group+".Folder"], "General."+group, value.items); err != nil {
+			return err
+		}
+	}
+	if err := p.General.SetNodeValue(p.generalNodes["Backend.LastUpdateUTC"], general.LastForward.Format(time.RFC3339)); err != nil {
+		return err
+	}
+	backup := p.State.ReadBackupEnrollment()
+	if err := p.General.SetNodeValue(p.generalNodes["BackupEnrollment.Data"], backup); err != nil {
+		return err
+	}
+	if err := p.General.SetNodeValue(p.generalNodes["BackupEnrollment.SerialNumber"], backup.Identity.SerialNumber); err != nil {
+		return err
+	}
+	if err := p.General.SetNodeValue(p.generalNodes["BackupEnrollment.ModuleType"], uint16(backup.Identity.ModuleType)); err != nil {
+		return err
+	}
+	if err := p.General.SetNodeValue(p.generalNodes["BackupEnrollment.VendorID"], backup.Identity.VendorID); err != nil {
+		return err
+	}
+	if err := p.General.SetNodeValue(p.generalNodes["BackupEnrollment.ArrayName"], backup.ArrayName); err != nil {
+		return err
+	}
+	if err := p.General.SetNodeValue(p.generalNodes["BackupEnrollment.Index"], backup.Index); err != nil {
+		return err
+	}
+	if err := p.General.SetNodeValue(p.generalNodes["BackupEnrollment.Applied"], backup.Applied); err != nil {
+		return err
+	}
+	if err := p.General.SetNodeValue(p.generalNodes["BackupEnrollment.LastMethod"], backup.LastMethod); err != nil {
+		return err
+	}
+	backupLastUpdate := ""
+	if !backup.LastUpdateUTC.IsZero() {
+		backupLastUpdate = backup.LastUpdateUTC.Format(time.RFC3339)
+	}
+	if err := p.General.SetNodeValue(p.generalNodes["BackupEnrollment.LastUpdateUTC"], backupLastUpdate); err != nil {
+		return err
+	}
+
+	scadaValues := map[string]struct {
+		count int
+		items any
+	}{
+		"Compressors":  {count: len(scada.Compressors), items: scada.Compressors},
+		"StorageUnits": {count: len(scada.StorageUnits), items: scada.StorageUnits},
+		"Dispensers":   {count: len(scada.Dispensers), items: scada.Dispensers},
+		"Coolers":      {count: len(scada.Coolers), items: scada.Coolers},
+	}
+	for group, value := range scadaValues {
+		if err := p.SCADA.SetNodeValue(p.scadaNodes[group+".Items"], value.items); err != nil {
+			return err
+		}
+		if err := p.SCADA.SetNodeValue(p.scadaNodes[group+".Count"], int32(value.count)); err != nil {
+			return err
+		}
+		if err := p.syncElementNodes(p.SCADA, p.scadaNodes[group+".Folder"], "SCADA."+group, value.items); err != nil {
+			return err
+		}
+	}
+	return p.SCADA.SetNodeValue(p.scadaNodes["SCADA.LastUpdateUTC"], scada.LastForward.Format(time.RFC3339))
+}
+
+func (p *Process) installMethods() error {
+	methodsNode := ua.NodeIDString{NamespaceIndex: 1, ID: "Methods"}
+	parseIdentity := func(req ua.CallMethodRequest) (IdentityType, ua.CallMethodResult, bool) {
+		if len(req.InputArguments) < 3 {
+			return IdentityType{}, ua.CallMethodResult{StatusCode: ua.BadArgumentsMissing}, false
+		}
+		if len(req.InputArguments) > 3 {
+			return IdentityType{}, ua.CallMethodResult{StatusCode: ua.BadTooManyArguments}, false
+		}
+
+		var statusCode ua.StatusCode = ua.Good
+		results := make([]ua.StatusCode, 3)
+
+		serial, ok := req.InputArguments[0].(uint32)
+		if !ok {
+			statusCode = ua.BadInvalidArgument
+			results[0] = ua.BadTypeMismatch
+		}
+		moduleType, ok := req.InputArguments[1].(uint16)
+		if !ok {
+			statusCode = ua.BadInvalidArgument
+			results[1] = ua.BadTypeMismatch
+		}
+		vendorID, ok := req.InputArguments[2].(uint16)
+		if !ok {
+			statusCode = ua.BadInvalidArgument
+			results[2] = ua.BadTypeMismatch
+		}
+		if statusCode != ua.Good {
+			return IdentityType{}, ua.CallMethodResult{StatusCode: statusCode, InputArgumentResults: results}, false
+		}
+
+		return IdentityType{
+			SerialNumber: serial,
+			ModuleType:   uint8(moduleType),
+			VendorID:     vendorID,
+		}, ua.CallMethodResult{}, true
+	}
+
+	install := func(id, name string, outputArgs []ua.Argument, handler func(IdentityType) ua.CallMethodResult) error {
+		methodNodeID, err := p.General.AddMethodNode(id, name, methodsNode, func(session *server.Session, req ua.CallMethodRequest) ua.CallMethodResult {
+			identity, result, ok := parseIdentity(req)
+			if !ok {
+				return result
+			}
+			return handler(identity)
+		})
+		if err != nil {
+			return err
+		}
+		p.methodNodes[id] = methodNodeID
+		methodNode := ua.ParseNodeID(methodNodeID)
+		if _, err := p.General.AddMethodArgumentsNode(methodNode, "InputArguments", []ua.Argument{
+			{Name: "SerialNumber", DataType: ua.DataTypeIDUInt32, ValueRank: ua.ValueRankScalar},
+			{Name: "ModuleType", DataType: ua.DataTypeIDUInt16, ValueRank: ua.ValueRankScalar},
+			{Name: "VendorID", DataType: ua.DataTypeIDUInt16, ValueRank: ua.ValueRankScalar},
+		}); err != nil {
+			return err
+		}
+		if _, err := p.General.AddMethodArgumentsNode(methodNode, "OutputArguments", outputArgs); err != nil {
+			return err
+		}
+		return nil
+	}
+
+	if err := install(
+		"Methods.IdentifyModule",
+		"IdentifyModule",
+		[]ua.Argument{
+			{Name: "Found", DataType: ua.DataTypeIDBoolean, ValueRank: ua.ValueRankScalar},
+			{Name: "ArrayName", DataType: ua.DataTypeIDString, ValueRank: ua.ValueRankScalar},
+			{Name: "Index", DataType: ua.DataTypeIDInt32, ValueRank: ua.ValueRankScalar},
+		},
+		func(identity IdentityType) ua.CallMethodResult {
+			enrollment, found := p.State.Resolve(identity)
+			p.onIdentify(IdentifyContext{
+				Identity:   identity,
+				Enrollment: enrollment,
+				Found:      found,
+				Method:     "IdentifyModule",
+				At:         time.Now().UTC(),
+			})
+			if !found {
+				return ua.CallMethodResult{
+					StatusCode:      ua.Good,
+					OutputArguments: []ua.Variant{false, "", int32(-1)},
+				}
+			}
+			return ua.CallMethodResult{
+				StatusCode:      ua.Good,
+				OutputArguments: []ua.Variant{true, string(enrollment.Kind), int32(enrollment.Index)},
+			}
+		},
+	); err != nil {
+		return err
+	}
+	if err := install(
+		"Methods.EnrollModule",
+		"EnrollModule",
+		[]ua.Argument{
+			{Name: "ArrayName", DataType: ua.DataTypeIDString, ValueRank: ua.ValueRankScalar},
+			{Name: "Index", DataType: ua.DataTypeIDInt32, ValueRank: ua.ValueRankScalar},
+		},
+		func(identity IdentityType) ua.CallMethodResult {
+			enrollment, err := p.State.Enroll(identity)
+			if err != nil {
+				return ua.CallMethodResult{StatusCode: ua.BadInvalidArgument}
+			}
+			PopulateBackendFromModules(p.State)
+			p.onEnroll(EnrollmentContext{
+				Identity:   identity,
+				Enrollment: enrollment,
+				Method:     "EnrollModule",
+				At:         time.Now().UTC(),
+			})
+			_ = p.publishSnapshot()
+			return ua.CallMethodResult{
+				StatusCode:      ua.Good,
+				OutputArguments: []ua.Variant{string(enrollment.Kind), int32(enrollment.Index)},
+			}
+		},
+	); err != nil {
+		return err
+	}
+	return install(
+		"Methods.BackupEnrollModule",
+		"BackupEnrollModule",
+		[]ua.Argument{
+			{Name: "ArrayName", DataType: ua.DataTypeIDString, ValueRank: ua.ValueRankScalar},
+			{Name: "Index", DataType: ua.DataTypeIDInt32, ValueRank: ua.ValueRankScalar},
+		},
+		func(identity IdentityType) ua.CallMethodResult {
+			enrollment, err := p.State.Enroll(identity)
+			if err != nil {
+				return ua.CallMethodResult{StatusCode: ua.BadInvalidArgument}
+			}
+			p.State.RecordBackupEnrollment(identity, enrollment, true, "BackupEnrollModule")
+			PopulateBackendFromModules(p.State)
+			p.onEnroll(EnrollmentContext{
+				Identity:   identity,
+				Enrollment: enrollment,
+				Method:     "BackupEnrollModule",
+				At:         time.Now().UTC(),
+			})
+			_ = p.publishSnapshot()
+			return ua.CallMethodResult{
+				StatusCode:      ua.Good,
+				OutputArguments: []ua.Variant{string(enrollment.Kind), int32(enrollment.Index)},
+			}
+		},
+	)
+}
+
+func (p *Process) syncElementNodes(srv *RuntimeOPCUAServer, folderID, prefix string, items any) error {
+	val := reflectValue(items)
+	for i := 0; i < val.Len(); i++ {
+		key := fmt.Sprintf("%s.Item_%d", prefix, i)
+		nodeID := ""
+		var ok bool
+		if srv == p.General {
+			nodeID, ok = p.generalNodes[key]
+		} else {
+			nodeID, ok = p.scadaNodes[key]
+		}
+		if !ok {
+			created, err := srv.AddValueNode(fmt.Sprintf("Item_%d", i), folderID, val.Index(i).Interface())
+			if err != nil {
+				return err
+			}
+			if srv == p.General {
+				p.generalNodes[key] = created
+			} else {
+				p.scadaNodes[key] = created
+			}
+			nodeID = created
+		}
+		if err := srv.SetNodeValue(nodeID, val.Index(i).Interface()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func reflectValue(items any) reflect.Value {
+	v := reflect.ValueOf(items)
+	if !v.IsValid() {
+		return reflect.MakeSlice(reflect.TypeOf([]string{}), 0, 0)
+	}
+	return v
+}
+
+func (p *Process) String() string {
+	return fmt.Sprintf("general=%s:%d scada=%s:%d", p.Config.Host, p.Config.GeneralPort, p.Config.Host, p.Config.SCADAPort)
+}

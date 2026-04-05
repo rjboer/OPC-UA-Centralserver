@@ -130,6 +130,57 @@ func (s *RuntimeOPCUAServer) AddValueNode(name, parent string, initVal any) (str
 	return s.addVariableNode(name, ua.ReferenceTypeIDOrganizes, ua.NodeIDString{NamespaceIndex: 1, ID: parent}, initVal)
 }
 
+func (s *RuntimeOPCUAServer) AddStructArrayNode(name, parent string, elemSample any) (string, error) {
+	value := reflect.ValueOf(elemSample)
+	if !value.IsValid() {
+		return "", fmt.Errorf("invalid struct sample")
+	}
+	if value.Kind() == reflect.Pointer {
+		value = value.Elem()
+	}
+	if value.Kind() != reflect.Struct {
+		return "", fmt.Errorf("struct array node requires struct sample, got %s", value.Type())
+	}
+
+	if err := s.generateTypeDefs(value); err != nil {
+		return "", err
+	}
+
+	typeID := ua.NodeIDString{NamespaceIndex: 2, ID: strings.ReplaceAll(value.Type().String(), ".", "_")}
+	id := s.nextNodeID
+	s.nextNodeID++
+	nodeID := fmt.Sprintf("ns=2;i=%d", id)
+
+	node := server.NewVariableNode(
+		s.Server,
+		ua.NodeIDNumeric{NamespaceIndex: 2, ID: id},
+		ua.QualifiedName{NamespaceIndex: 2, Name: name},
+		ua.LocalizedText{Text: name},
+		ua.LocalizedText{Text: ""},
+		nil,
+		[]ua.Reference{
+			{
+				ReferenceTypeID: ua.ReferenceTypeIDOrganizes,
+				IsInverse:       true,
+				TargetID:        ua.ExpandedNodeID{NodeID: ua.NodeIDString{NamespaceIndex: 1, ID: parent}},
+			},
+		},
+		ua.NewDataValue([]ua.ExtensionObject{}, 0, time.Now().UTC(), 0, time.Now().UTC(), 0),
+		typeID,
+		ua.ValueRankOneDimension,
+		[]uint32{0},
+		ua.AccessLevelsCurrentRead|ua.AccessLevelsCurrentWrite,
+		250.0,
+		false,
+		nil,
+	)
+
+	if err := s.NameSpaceMngr.AddNode(node); err != nil {
+		return "", err
+	}
+	return nodeID, nil
+}
+
 func (s *RuntimeOPCUAServer) AddPropertyNode(name string, parent ua.NodeID, initVal any) (string, error) {
 	return s.addVariableNode(name, ua.ReferenceTypeIDHasProperty, parent, initVal)
 }

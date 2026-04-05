@@ -124,7 +124,7 @@ func (p *Process) setupGeneralNodes() error {
 		if err := p.General.AddFolderNode(group, group, "ns=1;s=Backend"); err != nil {
 			return err
 		}
-		itemsNode, err := p.General.AddValueNode("Items", group, []string{})
+		dataNode, err := p.General.AddStructArrayNode("Data", group, generalGroupElemSample(group))
 		if err != nil {
 			return err
 		}
@@ -132,13 +132,8 @@ func (p *Process) setupGeneralNodes() error {
 		if err != nil {
 			return err
 		}
-		itemsFolder := group + "_Items"
-		if err := p.General.AddFolderNode(itemsFolder, "Elements", "ns=1;s="+group); err != nil {
-			return err
-		}
-		p.generalNodes[group+".Items"] = itemsNode
+		p.generalNodes[group+".Data"] = dataNode
 		p.generalNodes[group+".Count"] = countNode
-		p.generalNodes[group+".Folder"] = itemsFolder
 	}
 	lastUpdateNode, err := p.General.AddValueNode("LastUpdateUTC", "Backend", "")
 	if err != nil {
@@ -189,7 +184,7 @@ func (p *Process) setupSCADANodes() error {
 		if err := p.SCADA.AddFolderNode(group, group, "ns=1;s=SCADA"); err != nil {
 			return err
 		}
-		itemsNode, err := p.SCADA.AddValueNode("Items", group, []string{})
+		dataNode, err := p.SCADA.AddStructArrayNode("Data", group, scadaGroupElemSample(group))
 		if err != nil {
 			return err
 		}
@@ -197,13 +192,8 @@ func (p *Process) setupSCADANodes() error {
 		if err != nil {
 			return err
 		}
-		itemsFolder := group + "_Items"
-		if err := p.SCADA.AddFolderNode(itemsFolder, "Elements", "ns=1;s="+group); err != nil {
-			return err
-		}
-		p.scadaNodes[group+".Items"] = itemsNode
+		p.scadaNodes[group+".Data"] = dataNode
 		p.scadaNodes[group+".Count"] = countNode
-		p.scadaNodes[group+".Folder"] = itemsFolder
 	}
 	lastUpdateNode, err := p.SCADA.AddValueNode("LastUpdateUTC", "SCADA", "")
 	if err != nil {
@@ -222,22 +212,19 @@ func (p *Process) publishSnapshot() error {
 
 	generalValues := map[string]struct {
 		count int
-		items any
+		data  any
 	}{
-		"Compressors":           {count: len(general.Plant.Compressors), items: general.Plant.Compressors},
-		"CoolmarkModules":       {count: len(general.Plant.CoolmarkModules), items: general.Plant.CoolmarkModules},
-		"SmartSwitches":         {count: len(general.Plant.SmartSwitches), items: general.Plant.SmartSwitches},
-		"StorageModules":        {count: len(general.Plant.StorageModules), items: general.Plant.StorageModules},
-		"SupplyConnectionSkids": {count: len(general.Plant.SupplyConnectionSkids), items: general.Plant.SupplyConnectionSkids},
+		"Compressors":           {count: len(general.Plant.Compressors), data: general.Plant.Compressors},
+		"CoolmarkModules":       {count: len(general.Plant.CoolmarkModules), data: general.Plant.CoolmarkModules},
+		"SmartSwitches":         {count: len(general.Plant.SmartSwitches), data: general.Plant.SmartSwitches},
+		"StorageModules":        {count: len(general.Plant.StorageModules), data: general.Plant.StorageModules},
+		"SupplyConnectionSkids": {count: len(general.Plant.SupplyConnectionSkids), data: general.Plant.SupplyConnectionSkids},
 	}
 	for group, value := range generalValues {
-		if err := p.General.SetNodeValue(p.generalNodes[group+".Items"], value.items); err != nil {
+		if err := p.General.SetNodeValue(p.generalNodes[group+".Data"], toExtensionObjectArray(value.data)); err != nil {
 			return err
 		}
 		if err := p.General.SetNodeValue(p.generalNodes[group+".Count"], int32(value.count)); err != nil {
-			return err
-		}
-		if err := p.syncElementNodes(p.General, p.generalNodes[group+".Folder"], "General."+group, value.items); err != nil {
 			return err
 		}
 	}
@@ -279,21 +266,18 @@ func (p *Process) publishSnapshot() error {
 
 	scadaValues := map[string]struct {
 		count int
-		items any
+		data  any
 	}{
-		"Compressors":  {count: len(scada.Compressors), items: scada.Compressors},
-		"StorageUnits": {count: len(scada.StorageUnits), items: scada.StorageUnits},
-		"Dispensers":   {count: len(scada.Dispensers), items: scada.Dispensers},
-		"Coolers":      {count: len(scada.Coolers), items: scada.Coolers},
+		"Compressors":  {count: len(scada.Compressors), data: scada.Compressors},
+		"StorageUnits": {count: len(scada.StorageUnits), data: scada.StorageUnits},
+		"Dispensers":   {count: len(scada.Dispensers), data: scada.Dispensers},
+		"Coolers":      {count: len(scada.Coolers), data: scada.Coolers},
 	}
 	for group, value := range scadaValues {
-		if err := p.SCADA.SetNodeValue(p.scadaNodes[group+".Items"], value.items); err != nil {
+		if err := p.SCADA.SetNodeValue(p.scadaNodes[group+".Data"], toExtensionObjectArray(value.data)); err != nil {
 			return err
 		}
 		if err := p.SCADA.SetNodeValue(p.scadaNodes[group+".Count"], int32(value.count)); err != nil {
-			return err
-		}
-		if err := p.syncElementNodes(p.SCADA, p.scadaNodes[group+".Folder"], "SCADA."+group, value.items); err != nil {
 			return err
 		}
 	}
@@ -453,44 +437,51 @@ func (p *Process) installMethods() error {
 	)
 }
 
-func (p *Process) syncElementNodes(srv *RuntimeOPCUAServer, folderID, prefix string, items any) error {
-	val := reflectValue(items)
-	for i := 0; i < val.Len(); i++ {
-		key := fmt.Sprintf("%s.Item_%d", prefix, i)
-		nodeID := ""
-		var ok bool
-		if srv == p.General {
-			nodeID, ok = p.generalNodes[key]
-		} else {
-			nodeID, ok = p.scadaNodes[key]
-		}
-		if !ok {
-			created, err := srv.AddValueNode(fmt.Sprintf("Item_%d", i), folderID, val.Index(i).Interface())
-			if err != nil {
-				return err
-			}
-			if srv == p.General {
-				p.generalNodes[key] = created
-			} else {
-				p.scadaNodes[key] = created
-			}
-			nodeID = created
-		}
-		if err := srv.SetNodeValue(nodeID, val.Index(i).Interface()); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func reflectValue(items any) reflect.Value {
-	v := reflect.ValueOf(items)
-	if !v.IsValid() {
-		return reflect.MakeSlice(reflect.TypeOf([]string{}), 0, 0)
-	}
-	return v
-}
-
 func (p *Process) String() string {
 	return fmt.Sprintf("general=%s:%d scada=%s:%d", p.Config.Host, p.Config.GeneralPort, p.Config.Host, p.Config.SCADAPort)
+}
+
+func generalGroupElemSample(group string) any {
+	switch group {
+	case "Compressors":
+		return BackendCompressorModuleType{}
+	case "CoolmarkModules":
+		return BackendCoolmarkModuleType{}
+	case "SmartSwitches":
+		return BackendSmartSwitchModuleType{}
+	case "StorageModules":
+		return BackendStorageModuleType{}
+	case "SupplyConnectionSkids":
+		return BackendSupplyConnectionSkidModuleType{}
+	default:
+		return nil
+	}
+}
+
+func scadaGroupElemSample(group string) any {
+	switch group {
+	case "Compressors":
+		return SCADACompressorType{}
+	case "StorageUnits":
+		return SCADAStorageType{}
+	case "Dispensers":
+		return SCADADispenserType{}
+	case "Coolers":
+		return SCADACoolerType{}
+	default:
+		return nil
+	}
+}
+
+func toExtensionObjectArray(items any) []ua.ExtensionObject {
+	value := reflect.ValueOf(items)
+	if !value.IsValid() || value.Kind() != reflect.Slice {
+		return []ua.ExtensionObject{}
+	}
+
+	result := make([]ua.ExtensionObject, 0, value.Len())
+	for i := 0; i < value.Len(); i++ {
+		result = append(result, ua.ExtensionObject(value.Index(i).Interface()))
+	}
+	return result
 }

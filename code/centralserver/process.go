@@ -2,7 +2,9 @@ package centralserver
 
 import (
 	"fmt"
+	"net/http"
 	"reflect"
+	"sync"
 	"time"
 
 	"github.com/awcullen/opcua/server"
@@ -13,12 +15,13 @@ type ProcessConfig struct {
 	Host        string
 	GeneralPort int
 	SCADAPort   int
+	HTTPPort    int
 	DemoMode    bool
 }
 
 type Process struct {
 	Config  ProcessConfig
-	State   *CentralServerState
+	Memory  *System
 	General *RuntimeOPCUAServer
 	SCADA   *RuntimeOPCUAServer
 
@@ -28,12 +31,17 @@ type Process struct {
 	onEnroll     func(EnrollmentContext)
 	onIdentify   func(IdentifyContext)
 	stopCh       chan struct{}
+	httpServer   *http.Server
+	statusMu     sync.RWMutex
+	startedAt    time.Time
+	lastPublish  time.Time
+	lastError    string
 }
 
 func NewProcess(cfg ProcessConfig) *Process {
 	return &Process{
 		Config:       cfg,
-		State:        NewCentralServerState(),
+		Memory:       NewSystem(),
 		General:      NewRuntimeOPCUAServer(ServerSettings{Host: cfg.Host, Port: cfg.GeneralPort}),
 		SCADA:        NewRuntimeOPCUAServer(ServerSettings{Host: cfg.Host, Port: cfg.SCADAPort}),
 		generalNodes: map[string]string{},
@@ -47,7 +55,7 @@ func NewProcess(cfg ProcessConfig) *Process {
 
 func (p *Process) Start() error {
 	if p.Config.DemoMode {
-		SeedGeneralServerDemoMode(p.State, GeneralServerDemoConfig{Enabled: true, SiteID: "demo"})
+		SeedGeneralServerDemoMode(p.Memory, GeneralServerDemoConfig{Enabled: true, SiteID: "demo"})
 	}
 
 	if err := p.General.Start(); err != nil {
@@ -67,10 +75,17 @@ func (p *Process) Start() error {
 		return err
 	}
 
-	if err := p.publishSnapshot(); err != nil {
+	if err := p.refreshPublishedState(); err != nil {
 		p.Stop()
 		return err
 	}
+
+	if err := p.startHTTPServer(); err != nil {
+		p.Stop()
+		return err
+	}
+
+	p.startedAt = time.Now().UTC()
 
 	go p.run()
 	return nil
@@ -84,6 +99,9 @@ func (p *Process) Stop() {
 	}
 	p.SCADA.Stop()
 	p.General.Stop()
+	if p.httpServer != nil {
+		_ = p.httpServer.Close()
+	}
 }
 
 func (p *Process) run() {
@@ -94,13 +112,35 @@ func (p *Process) run() {
 		select {
 		case <-ticker.C:
 			if p.Config.DemoMode {
-				StepGeneralServerDemoMode(p.State, time.Now().UTC())
+				StepGeneralServerDemoMode(p.Memory, time.Now().UTC())
 			}
-			_ = p.publishSnapshot()
+			_ = p.refreshPublishedState()
 		case <-p.stopCh:
 			return
 		}
 	}
+}
+
+func (p *Process) refreshPublishedState() error {
+	if !p.Config.DemoMode || p.Memory.HasModules() {
+		PopulateBackendFromModules(p.Memory)
+	}
+	err := p.publishSnapshot()
+	p.recordPublishResult(err)
+	return err
+}
+
+func (p *Process) recordPublishResult(err error) {
+	p.statusMu.Lock()
+	defer p.statusMu.Unlock()
+
+	if err != nil {
+		p.lastError = err.Error()
+		return
+	}
+
+	p.lastPublish = time.Now().UTC()
+	p.lastError = ""
 }
 
 func (p *Process) setupGeneralNodes() error {
@@ -207,8 +247,8 @@ func (p *Process) publishSnapshot() error {
 	general := &GeneralOPCUAServerState{}
 	scada := &CustomerSCADAState{}
 
-	ForwardToGeneralOPCUA(p.State, general)
-	ForwardToCustomerSCADA(p.State, scada)
+	ForwardToGeneralOPCUA(p.Memory, general)
+	ForwardToCustomerSCADA(p.Memory, scada)
 
 	generalValues := map[string]struct {
 		count int
@@ -231,7 +271,7 @@ func (p *Process) publishSnapshot() error {
 	if err := p.General.SetNodeValue(p.generalNodes["Backend.LastUpdateUTC"], general.LastForward.Format(time.RFC3339)); err != nil {
 		return err
 	}
-	backup := p.State.ReadBackupEnrollment()
+	backup := p.Memory.ReadBackupEnrollment()
 	if err := p.General.SetNodeValue(p.generalNodes["BackupEnrollment.Data"], backup); err != nil {
 		return err
 	}
@@ -358,7 +398,7 @@ func (p *Process) installMethods() error {
 			{Name: "Index", DataType: ua.DataTypeIDInt32, ValueRank: ua.ValueRankScalar},
 		},
 		func(identity IdentityType) ua.CallMethodResult {
-			enrollment, found := p.State.Resolve(identity)
+			enrollment, found := p.Memory.Resolve(identity)
 			p.onIdentify(IdentifyContext{
 				Identity:   identity,
 				Enrollment: enrollment,
@@ -388,18 +428,17 @@ func (p *Process) installMethods() error {
 			{Name: "Index", DataType: ua.DataTypeIDInt32, ValueRank: ua.ValueRankScalar},
 		},
 		func(identity IdentityType) ua.CallMethodResult {
-			enrollment, err := p.State.Enroll(identity)
+			enrollment, err := p.Memory.AddModule(identity)
 			if err != nil {
 				return ua.CallMethodResult{StatusCode: ua.BadInvalidArgument}
 			}
-			PopulateBackendFromModules(p.State)
 			p.onEnroll(EnrollmentContext{
 				Identity:   identity,
 				Enrollment: enrollment,
 				Method:     "EnrollModule",
 				At:         time.Now().UTC(),
 			})
-			_ = p.publishSnapshot()
+			_ = p.refreshPublishedState()
 			return ua.CallMethodResult{
 				StatusCode:      ua.Good,
 				OutputArguments: []ua.Variant{string(enrollment.Kind), int32(enrollment.Index)},
@@ -416,19 +455,18 @@ func (p *Process) installMethods() error {
 			{Name: "Index", DataType: ua.DataTypeIDInt32, ValueRank: ua.ValueRankScalar},
 		},
 		func(identity IdentityType) ua.CallMethodResult {
-			enrollment, err := p.State.Enroll(identity)
+			enrollment, err := p.Memory.AddModule(identity)
 			if err != nil {
 				return ua.CallMethodResult{StatusCode: ua.BadInvalidArgument}
 			}
-			p.State.RecordBackupEnrollment(identity, enrollment, true, "BackupEnrollModule")
-			PopulateBackendFromModules(p.State)
+			p.Memory.RecordBackupEnrollment(identity, enrollment, true, "BackupEnrollModule")
 			p.onEnroll(EnrollmentContext{
 				Identity:   identity,
 				Enrollment: enrollment,
 				Method:     "BackupEnrollModule",
 				At:         time.Now().UTC(),
 			})
-			_ = p.publishSnapshot()
+			_ = p.refreshPublishedState()
 			return ua.CallMethodResult{
 				StatusCode:      ua.Good,
 				OutputArguments: []ua.Variant{string(enrollment.Kind), int32(enrollment.Index)},

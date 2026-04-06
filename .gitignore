@@ -37,3 +37,5 @@ go.work.sum
 ./documentation/
 documentation/
 snippets/
+*.log
+code/cmd/testprogram_1/

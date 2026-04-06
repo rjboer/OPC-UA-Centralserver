@@ -10,83 +10,83 @@ type GeneralServerDemoConfig struct {
 	SiteID  string
 }
 
-func SeedGeneralServerDemoMode(state *CentralServerState, cfg GeneralServerDemoConfig) {
-	if state == nil || !cfg.Enabled {
+func SeedGeneralServerDemoMode(memory *System, cfg GeneralServerDemoConfig) {
+	if memory == nil || !cfg.Enabled {
 		return
 	}
 
-	state.mu.Lock()
-	defer state.mu.Unlock()
+	memory.mu.Lock()
+	defer memory.mu.Unlock()
 
-	state.Backend.Compressors = []BackendCompressorModuleType{
+	memory.Backend.Compressors = []BackendCompressorModuleType{
 		{Identity: demoIdentity(1, ModuleTypeCompressor)},
 		{Identity: demoIdentity(2, ModuleTypeCompressor)},
 	}
-	state.Backend.CoolmarkModules = []BackendCoolmarkModuleType{
+	memory.Backend.CoolmarkModules = []BackendCoolmarkModuleType{
 		{Identity: demoIdentity(10, ModuleTypeCoolmark)},
 	}
-	state.Backend.CoolingTorusUnits = []BackendTorusModuleType{
+	memory.Backend.CoolingTorusUnits = []BackendTorusModuleType{
 		{Identity: demoIdentity(11, ModuleTypeTorus)},
 	}
-	state.Backend.DispensersH35 = []BackendDispenserModuleType{
+	memory.Backend.DispensersH35 = []BackendDispenserModuleType{
 		{Identity: demoIdentity(20, ModuleTypeDispenserH35)},
 		{Identity: demoIdentity(21, ModuleTypeDispenserH35)},
 	}
-	state.Backend.DispensersH70 = []BackendDispenserModuleType{
+	memory.Backend.DispensersH70 = []BackendDispenserModuleType{
 		{Identity: demoIdentity(22, ModuleTypeDispenserH70)},
 	}
-	state.Backend.H35Towers = []BackendTowerModuleType{
+	memory.Backend.H35Towers = []BackendTowerModuleType{
 		{Identity: demoIdentity(30, ModuleTypeStorage)},
 		{Identity: demoIdentity(31, ModuleTypeStorage)},
 	}
-	state.Backend.H70Towers = []BackendTowerModuleType{
+	memory.Backend.H70Towers = []BackendTowerModuleType{
 		{Identity: demoIdentity(32, ModuleTypeStorage)},
 	}
-	state.Backend.StorageModules = []BackendStorageModuleType{
+	memory.Backend.StorageModules = []BackendStorageModuleType{
 		{Identity: demoIdentity(33, ModuleTypeStorage)},
 	}
-	state.Backend.StorageSources = []BackendStorageSourceModuleType{
+	memory.Backend.StorageSources = []BackendStorageSourceModuleType{
 		{Identity: demoIdentity(40, ModuleTypeStorage), SourceNr: 1, Enabled: true},
 		{Identity: demoIdentity(41, ModuleTypeStorage), SourceNr: 2, Enabled: true},
 	}
-	state.Backend.SupplyConnectionSkids = []BackendSupplyConnectionSkidModuleType{
+	memory.Backend.SupplyConnectionSkids = []BackendSupplyConnectionSkidModuleType{
 		{Identity: demoIdentity(50, ModuleTypeStorage)},
 	}
-	state.Backend.StorageMasters = []BackendStorageMasterModuleType{
+	memory.Backend.StorageMasters = []BackendStorageMasterModuleType{
 		{Identity: demoIdentity(60, ModuleTypeStorage)},
 	}
-	state.Backend.SmartSwitches = []BackendSmartSwitchModuleType{
+	memory.Backend.SmartSwitches = []BackendSmartSwitchModuleType{
 		{Identity: demoIdentity(70, ModuleTypeStorage)},
 	}
-	state.Backend.PrioritySelections = []BackendPrioritySelectionModuleType{
+	memory.Backend.PrioritySelections = []BackendPrioritySelectionModuleType{
 		{Identity: demoIdentity(80, ModuleTypeStorage)},
 	}
-	state.Backend.PriorityStatuses = []BackendPriorityStatusModuleType{
+	memory.Backend.PriorityStatuses = []BackendPriorityStatusModuleType{
 		{Identity: demoIdentity(81, ModuleTypeStorage)},
 	}
-	state.Backend.DispenserLines = []BackendDispenserLineModuleType{
+	memory.Backend.DispenserLines = []BackendDispenserLineModuleType{
 		{Identity: demoIdentity(90, ModuleTypeStorage), LineNr: 1},
 		{Identity: demoIdentity(91, ModuleTypeStorage), LineNr: 2},
 	}
-	state.Backend.FeedCommunications = []BackendFeedCommunicationModuleType{
+	memory.Backend.FeedCommunications = []BackendFeedCommunicationModuleType{
 		{Identity: demoIdentity(100, ModuleTypeStorage), FeedNr: 1},
 		{Identity: demoIdentity(101, ModuleTypeStorage), FeedNr: 2},
 	}
-	state.Backend.DispenserLineCommunications = []BackendCommunicationModuleType{
+	memory.Backend.DispenserLineCommunications = []BackendCommunicationModuleType{
 		{Identity: demoIdentity(110, ModuleTypeStorage)},
 	}
 
-	stepGeneralServerDemoLocked(&state.Backend, time.Now().UTC())
+	stepGeneralServerDemoLocked(&memory.Backend, time.Now().UTC())
 }
 
-func StepGeneralServerDemoMode(state *CentralServerState, now time.Time) {
-	if state == nil {
+func StepGeneralServerDemoMode(memory *System, now time.Time) {
+	if memory == nil {
 		return
 	}
 
-	state.mu.Lock()
-	defer state.mu.Unlock()
-	stepGeneralServerDemoLocked(&state.Backend, now.UTC())
+	memory.mu.Lock()
+	defer memory.mu.Unlock()
+	stepGeneralServerDemoLocked(&memory.Backend, now.UTC())
 }
 
 func stepGeneralServerDemoLocked(plant *BackendPlantState, now time.Time) {

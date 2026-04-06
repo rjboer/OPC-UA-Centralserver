@@ -227,13 +227,35 @@ func (s *RuntimeOPCUAServer) addVariableNode(name string, refType ua.NodeID, par
 
 func (s *RuntimeOPCUAServer) AddMethodNode(id, name string, parent ua.NodeID, handler func(*server.Session, ua.CallMethodRequest) ua.CallMethodResult) (string, error) {
 	nodeID := ua.NodeIDString{NamespaceIndex: 2, ID: id}
+	rolePermissions := []ua.RolePermissionType{
+		{
+			RoleID:      ua.ObjectIDWellKnownRoleAnonymous,
+			Permissions: ua.PermissionTypeBrowse | ua.PermissionTypeRead | ua.PermissionTypeCall,
+		},
+		{
+			RoleID:      ua.ObjectIDWellKnownRoleAuthenticatedUser,
+			Permissions: ua.PermissionTypeBrowse | ua.PermissionTypeRead | ua.PermissionTypeCall,
+		},
+		{
+			RoleID:      ua.ObjectIDWellKnownRoleOperator,
+			Permissions: ua.PermissionTypeBrowse | ua.PermissionTypeRead | ua.PermissionTypeWrite | ua.PermissionTypeCall,
+		},
+		{
+			RoleID:      ua.ObjectIDWellKnownRoleEngineer,
+			Permissions: ua.PermissionTypeBrowse | ua.PermissionTypeRead | ua.PermissionTypeWrite | ua.PermissionTypeCall,
+		},
+		{
+			RoleID:      ua.ObjectIDWellKnownRoleSupervisor,
+			Permissions: ua.PermissionTypeBrowse | ua.PermissionTypeRead | ua.PermissionTypeWrite | ua.PermissionTypeCall,
+		},
+	}
 	node := server.NewMethodNode(
 		s.Server,
 		nodeID,
 		ua.QualifiedName{NamespaceIndex: 2, Name: name},
 		ua.LocalizedText{Text: name},
 		ua.LocalizedText{Text: ""},
-		nil,
+		rolePermissions,
 		[]ua.Reference{
 			{
 				ReferenceTypeID: ua.ReferenceTypeIDHasComponent,

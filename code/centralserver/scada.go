@@ -2,7 +2,7 @@ package centralserver
 
 import "time"
 
-func ForwardToCustomerSCADA(src *CentralServerState, dst *CustomerSCADAState) {
+func ForwardToCustomerSCADA(src *System, dst *CustomerSCADAState) {
 	if src == nil || dst == nil {
 		return
 	}

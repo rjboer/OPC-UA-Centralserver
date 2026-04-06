@@ -47,6 +47,7 @@ type OPCUAcomType struct{}
 
 type FSSModuleType struct {
 	Identity       IdentityType
+	Active         bool
 	OPCUAcom       OPCUAcomType
 	NetworkEq      SubNetworkConType
 	ModuleErrorlog []ErrorlogType
@@ -196,8 +197,7 @@ type StageStatusType struct {
 }
 
 type BackendPlantState struct {
-	LastUpdate time.Time
-
+	LastUpdate                  time.Time
 	Compressors                 []BackendCompressorModuleType
 	CoolmarkModules             []BackendCoolmarkModuleType
 	CoolingTorusUnits           []BackendTorusModuleType
@@ -433,7 +433,17 @@ type SCADACoolerType struct {
 	Status             string
 }
 
-type CentralServerState struct {
+type ModuleStatusView struct {
+	Key          string
+	Kind         ModuleKind
+	Index        int
+	Active       bool
+	SerialNumber uint32
+	ModuleType   uint8
+	VendorID     uint16
+}
+
+type System struct {
 	mu sync.RWMutex
 
 	Modules FSSmodsType
@@ -444,8 +454,8 @@ type CentralServerState struct {
 	identityIndex map[string]Enrollment
 }
 
-func NewCentralServerState() *CentralServerState {
-	return &CentralServerState{
+func NewSystem() *System {
+	return &System{
 		Modules:          FSSmodsType{},
 		Backend:          NewBackendPlantState(),
 		BackupEnrollment: BackupEnrollmentState{},

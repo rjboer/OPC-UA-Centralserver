@@ -14,6 +14,7 @@ func main() {
 		Host:        "127.0.0.1",
 		GeneralPort: 4842,
 		SCADAPort:   4844,
+		HTTPPort:    8080,
 		DemoMode:    true,
 	})
 	process.SetIdentifyCallback(func(ctx centralserver.IdentifyContext) {
@@ -30,6 +31,8 @@ func main() {
 
 	log.Printf("general OPC UA server running on opc.tcp://%s:%d", process.Config.Host, process.Config.GeneralPort)
 	log.Printf("SCADA OPC UA server running on opc.tcp://%s:%d", process.Config.Host, process.Config.SCADAPort)
+	log.Printf("HTTP health interface running on http://%s:%d/health", process.Config.Host, process.Config.HTTPPort)
+	log.Printf("HTTP admin interface running on http://%s:%d/admin", process.Config.Host, process.Config.HTTPPort)
 
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)

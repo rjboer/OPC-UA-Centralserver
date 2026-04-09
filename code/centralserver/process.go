@@ -2,6 +2,7 @@ package centralserver
 
 import (
 	"fmt"
+	"log"
 	"net/http"
 	"reflect"
 	"sync"
@@ -54,33 +55,40 @@ func NewProcess(cfg ProcessConfig) *Process {
 }
 
 func (p *Process) Start() error {
+	log.Printf("process start: host=%s general_port=%d scada_port=%d http_port=%d demo_mode=%t", p.Config.Host, p.Config.GeneralPort, p.Config.SCADAPort, p.Config.HTTPPort, p.Config.DemoMode)
 	if p.Config.DemoMode {
 		SeedGeneralServerDemoMode(p.Memory, GeneralServerDemoConfig{Enabled: true, SiteID: "demo"})
 	}
 
 	if err := p.General.Start(); err != nil {
+		log.Printf("process start failed: general server start: %v", err)
 		return err
 	}
 	if err := p.SCADA.Start(); err != nil {
+		log.Printf("process start failed: scada server start: %v", err)
 		p.General.Stop()
 		return err
 	}
 
 	if err := p.setupGeneralNodes(); err != nil {
+		log.Printf("process start failed: setup general nodes: %v", err)
 		p.Stop()
 		return err
 	}
 	if err := p.setupSCADANodes(); err != nil {
+		log.Printf("process start failed: setup scada nodes: %v", err)
 		p.Stop()
 		return err
 	}
 
 	if err := p.refreshPublishedState(); err != nil {
+		log.Printf("process start failed: initial publish: %v", err)
 		p.Stop()
 		return err
 	}
 
 	if err := p.startHTTPServer(); err != nil {
+		log.Printf("process start failed: http server: %v", err)
 		p.Stop()
 		return err
 	}
@@ -88,10 +96,12 @@ func (p *Process) Start() error {
 	p.startedAt = time.Now().UTC()
 
 	go p.run()
+	log.Printf("process started")
 	return nil
 }
 
 func (p *Process) Stop() {
+	log.Printf("process stopping")
 	select {
 	case <-p.stopCh:
 	default:
@@ -126,6 +136,9 @@ func (p *Process) refreshPublishedState() error {
 		PopulateBackendFromModules(p.Memory)
 	}
 	err := p.publishSnapshot()
+	if err != nil {
+		log.Printf("publish snapshot failed: %v", err)
+	}
 	p.recordPublishResult(err)
 	return err
 }
@@ -145,12 +158,15 @@ func (p *Process) recordPublishResult(err error) {
 
 func (p *Process) setupGeneralNodes() error {
 	if err := p.General.AddFolderNode("Methods", "Methods", "i=85"); err != nil {
+		log.Printf("setup general nodes failed: folder Methods: %v", err)
 		return err
 	}
 	if err := p.General.AddFolderNode("Backend", "Backend", "i=85"); err != nil {
+		log.Printf("setup general nodes failed: folder Backend: %v", err)
 		return err
 	}
 	if err := p.installMethods(); err != nil {
+		log.Printf("setup general nodes failed: install methods: %v", err)
 		return err
 	}
 	groups := []string{
@@ -162,14 +178,17 @@ func (p *Process) setupGeneralNodes() error {
 	}
 	for _, group := range groups {
 		if err := p.General.AddFolderNode(group, group, "ns=1;s=Backend"); err != nil {
+			log.Printf("setup general nodes failed: folder %s: %v", group, err)
 			return err
 		}
 		dataNode, err := p.General.AddStructArrayNode("Data", group, generalGroupElemSample(group))
 		if err != nil {
+			log.Printf("setup general nodes failed: data node for %s: %v", group, err)
 			return err
 		}
 		countNode, err := p.General.AddValueNode("Count", group, int32(0))
 		if err != nil {
+			log.Printf("setup general nodes failed: count node for %s: %v", group, err)
 			return err
 		}
 		p.generalNodes[group+".Data"] = dataNode
@@ -177,15 +196,18 @@ func (p *Process) setupGeneralNodes() error {
 	}
 	lastUpdateNode, err := p.General.AddValueNode("LastUpdateUTC", "Backend", "")
 	if err != nil {
+		log.Printf("setup general nodes failed: Backend.LastUpdateUTC: %v", err)
 		return err
 	}
 	p.generalNodes["Backend.LastUpdateUTC"] = lastUpdateNode
 
 	if err := p.General.AddFolderNode("BackupEnrollment", "BackupEnrollment", "ns=1;s=Backend"); err != nil {
+		log.Printf("setup general nodes failed: folder BackupEnrollment: %v", err)
 		return err
 	}
 	backupDataNode, err := p.General.AddValueNode("Data", "BackupEnrollment", BackupEnrollmentState{})
 	if err != nil {
+		log.Printf("setup general nodes failed: BackupEnrollment.Data: %v", err)
 		return err
 	}
 	p.generalNodes["BackupEnrollment.Data"] = backupDataNode
@@ -203,6 +225,7 @@ func (p *Process) setupGeneralNodes() error {
 	for field, initVal := range backupFieldDefaults {
 		nodeID, nodeErr := p.General.AddValueNode(field, "BackupEnrollment", initVal)
 		if nodeErr != nil {
+			log.Printf("setup general nodes failed: BackupEnrollment.%s: %v", field, nodeErr)
 			return nodeErr
 		}
 		p.generalNodes["BackupEnrollment."+field] = nodeID
@@ -212,24 +235,33 @@ func (p *Process) setupGeneralNodes() error {
 
 func (p *Process) setupSCADANodes() error {
 	if err := p.SCADA.AddFolderNode("SCADA", "SCADA", "i=85"); err != nil {
+		log.Printf("setup scada nodes failed: folder SCADA: %v", err)
 		return err
 	}
 	groups := []string{
+		"HydrogenSupplies",
 		"Compressors",
 		"StorageUnits",
 		"Dispensers",
 		"Coolers",
+		"RefuelingSessions",
+		"ActiveAlarms",
+		"PowerMeters",
+		"ControlledFunctions",
 	}
 	for _, group := range groups {
 		if err := p.SCADA.AddFolderNode(group, group, "ns=1;s=SCADA"); err != nil {
+			log.Printf("setup scada nodes failed: folder %s: %v", group, err)
 			return err
 		}
 		dataNode, err := p.SCADA.AddStructArrayNode("Data", group, scadaGroupElemSample(group))
 		if err != nil {
+			log.Printf("setup scada nodes failed: data node for %s: %v", group, err)
 			return err
 		}
 		countNode, err := p.SCADA.AddValueNode("Count", group, int32(0))
 		if err != nil {
+			log.Printf("setup scada nodes failed: count node for %s: %v", group, err)
 			return err
 		}
 		p.scadaNodes[group+".Data"] = dataNode
@@ -237,6 +269,7 @@ func (p *Process) setupSCADANodes() error {
 	}
 	lastUpdateNode, err := p.SCADA.AddValueNode("LastUpdateUTC", "SCADA", "")
 	if err != nil {
+		log.Printf("setup scada nodes failed: SCADA.LastUpdateUTC: %v", err)
 		return err
 	}
 	p.scadaNodes["SCADA.LastUpdateUTC"] = lastUpdateNode
@@ -262,38 +295,49 @@ func (p *Process) publishSnapshot() error {
 	}
 	for group, value := range generalValues {
 		if err := p.General.SetNodeValue(p.generalNodes[group+".Data"], toExtensionObjectArray(value.data)); err != nil {
+			log.Printf("publish general group failed: %s.Data: %v", group, err)
 			return err
 		}
 		if err := p.General.SetNodeValue(p.generalNodes[group+".Count"], int32(value.count)); err != nil {
+			log.Printf("publish general group failed: %s.Count: %v", group, err)
 			return err
 		}
 	}
 	if err := p.General.SetNodeValue(p.generalNodes["Backend.LastUpdateUTC"], general.LastForward.Format(time.RFC3339)); err != nil {
+		log.Printf("publish general failed: Backend.LastUpdateUTC: %v", err)
 		return err
 	}
 	backup := p.Memory.ReadBackupEnrollment()
 	if err := p.General.SetNodeValue(p.generalNodes["BackupEnrollment.Data"], backup); err != nil {
+		log.Printf("publish general failed: BackupEnrollment.Data: %v", err)
 		return err
 	}
 	if err := p.General.SetNodeValue(p.generalNodes["BackupEnrollment.SerialNumber"], backup.Identity.SerialNumber); err != nil {
+		log.Printf("publish general failed: BackupEnrollment.SerialNumber: %v", err)
 		return err
 	}
 	if err := p.General.SetNodeValue(p.generalNodes["BackupEnrollment.ModuleType"], uint16(backup.Identity.ModuleType)); err != nil {
+		log.Printf("publish general failed: BackupEnrollment.ModuleType: %v", err)
 		return err
 	}
 	if err := p.General.SetNodeValue(p.generalNodes["BackupEnrollment.VendorID"], backup.Identity.VendorID); err != nil {
+		log.Printf("publish general failed: BackupEnrollment.VendorID: %v", err)
 		return err
 	}
 	if err := p.General.SetNodeValue(p.generalNodes["BackupEnrollment.ArrayName"], backup.ArrayName); err != nil {
+		log.Printf("publish general failed: BackupEnrollment.ArrayName: %v", err)
 		return err
 	}
 	if err := p.General.SetNodeValue(p.generalNodes["BackupEnrollment.Index"], backup.Index); err != nil {
+		log.Printf("publish general failed: BackupEnrollment.Index: %v", err)
 		return err
 	}
 	if err := p.General.SetNodeValue(p.generalNodes["BackupEnrollment.Applied"], backup.Applied); err != nil {
+		log.Printf("publish general failed: BackupEnrollment.Applied: %v", err)
 		return err
 	}
 	if err := p.General.SetNodeValue(p.generalNodes["BackupEnrollment.LastMethod"], backup.LastMethod); err != nil {
+		log.Printf("publish general failed: BackupEnrollment.LastMethod: %v", err)
 		return err
 	}
 	backupLastUpdate := ""
@@ -301,6 +345,7 @@ func (p *Process) publishSnapshot() error {
 		backupLastUpdate = backup.LastUpdateUTC.Format(time.RFC3339)
 	}
 	if err := p.General.SetNodeValue(p.generalNodes["BackupEnrollment.LastUpdateUTC"], backupLastUpdate); err != nil {
+		log.Printf("publish general failed: BackupEnrollment.LastUpdateUTC: %v", err)
 		return err
 	}
 
@@ -308,20 +353,31 @@ func (p *Process) publishSnapshot() error {
 		count int
 		data  any
 	}{
-		"Compressors":  {count: len(scada.Compressors), data: scada.Compressors},
-		"StorageUnits": {count: len(scada.StorageUnits), data: scada.StorageUnits},
-		"Dispensers":   {count: len(scada.Dispensers), data: scada.Dispensers},
-		"Coolers":      {count: len(scada.Coolers), data: scada.Coolers},
+		"HydrogenSupplies":    {count: len(scada.HydrogenSupplies), data: scada.HydrogenSupplies},
+		"Compressors":         {count: len(scada.Compressors), data: scada.Compressors},
+		"StorageUnits":        {count: len(scada.StorageUnits), data: scada.StorageUnits},
+		"Dispensers":          {count: len(scada.Dispensers), data: scada.Dispensers},
+		"Coolers":             {count: len(scada.Coolers), data: scada.Coolers},
+		"RefuelingSessions":   {count: len(scada.RefuelingSessions), data: scada.RefuelingSessions},
+		"ActiveAlarms":        {count: len(scada.ActiveAlarms), data: scada.ActiveAlarms},
+		"PowerMeters":         {count: len(scada.PowerMeters), data: scada.PowerMeters},
+		"ControlledFunctions": {count: len(scada.ControlledFunctions), data: scada.ControlledFunctions},
 	}
 	for group, value := range scadaValues {
 		if err := p.SCADA.SetNodeValue(p.scadaNodes[group+".Data"], toExtensionObjectArray(value.data)); err != nil {
+			log.Printf("publish scada group failed: %s.Data: %v", group, err)
 			return err
 		}
 		if err := p.SCADA.SetNodeValue(p.scadaNodes[group+".Count"], int32(value.count)); err != nil {
+			log.Printf("publish scada group failed: %s.Count: %v", group, err)
 			return err
 		}
 	}
-	return p.SCADA.SetNodeValue(p.scadaNodes["SCADA.LastUpdateUTC"], scada.LastForward.Format(time.RFC3339))
+	if err := p.SCADA.SetNodeValue(p.scadaNodes["SCADA.LastUpdateUTC"], scada.LastForward.Format(time.RFC3339)); err != nil {
+		log.Printf("publish scada failed: SCADA.LastUpdateUTC: %v", err)
+		return err
+	}
+	return nil
 }
 
 func (p *Process) installMethods() error {
@@ -447,6 +503,42 @@ func (p *Process) installMethods() error {
 	); err != nil {
 		return err
 	}
+	testMethodNodeID, err := p.General.AddMethodNode("Methods.EnrollTest", "EnrollTest", methodsNode, func(session *server.Session, req ua.CallMethodRequest) ua.CallMethodResult {
+		if len(req.InputArguments) < 1 {
+			return ua.CallMethodResult{StatusCode: ua.BadArgumentsMissing}
+		}
+		if len(req.InputArguments) > 1 {
+			return ua.CallMethodResult{StatusCode: ua.BadTooManyArguments}
+		}
+
+		input, ok := req.InputArguments[0].(int32)
+		if !ok {
+			return ua.CallMethodResult{
+				StatusCode:           ua.BadInvalidArgument,
+				InputArgumentResults: []ua.StatusCode{ua.BadTypeMismatch},
+			}
+		}
+
+		return ua.CallMethodResult{
+			StatusCode:      ua.Good,
+			OutputArguments: []ua.Variant{input + 1},
+		}
+	})
+	if err != nil {
+		return err
+	}
+	p.methodNodes["Methods.EnrollTest"] = testMethodNodeID
+	testMethodNode := ua.ParseNodeID(testMethodNodeID)
+	if _, err := p.General.AddMethodArgumentsNode(testMethodNode, "InputArguments", []ua.Argument{
+		{Name: "Value", DataType: ua.DataTypeIDInt32, ValueRank: ua.ValueRankScalar},
+	}); err != nil {
+		return err
+	}
+	if _, err := p.General.AddMethodArgumentsNode(testMethodNode, "OutputArguments", []ua.Argument{
+		{Name: "ValuePlusOne", DataType: ua.DataTypeIDInt32, ValueRank: ua.ValueRankScalar},
+	}); err != nil {
+		return err
+	}
 	return install(
 		"Methods.BackupEnrollModule",
 		"BackupEnrollModule",
@@ -498,6 +590,8 @@ func generalGroupElemSample(group string) any {
 
 func scadaGroupElemSample(group string) any {
 	switch group {
+	case "HydrogenSupplies":
+		return SCADAHydrogenSupplyType{}
 	case "Compressors":
 		return SCADACompressorType{}
 	case "StorageUnits":
@@ -506,6 +600,14 @@ func scadaGroupElemSample(group string) any {
 		return SCADADispenserType{}
 	case "Coolers":
 		return SCADACoolerType{}
+	case "RefuelingSessions":
+		return BackendRefuelingSessionType{}
+	case "ActiveAlarms":
+		return BackendAlarmType{}
+	case "PowerMeters":
+		return BackendPowerType{}
+	case "ControlledFunctions":
+		return BackendControlledFunctionsType{}
 	default:
 		return nil
 	}

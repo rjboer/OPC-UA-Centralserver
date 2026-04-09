@@ -16,6 +16,7 @@ import (
 	"os"
 	pathpkg "path"
 	"reflect"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -36,6 +37,54 @@ type RuntimeOPCUAServer struct {
 	nextNodeID    uint32
 }
 
+const runtimeNamespaceURI = "urn:opc-ua-centralserver:runtime"
+
+var variableRolePermissions = []ua.RolePermissionType{
+	{
+		RoleID:      ua.ObjectIDWellKnownRoleAnonymous,
+		Permissions: ua.PermissionTypeBrowse | ua.PermissionTypeRead | ua.PermissionTypeWrite,
+	},
+	{
+		RoleID:      ua.ObjectIDWellKnownRoleAuthenticatedUser,
+		Permissions: ua.PermissionTypeBrowse | ua.PermissionTypeRead | ua.PermissionTypeWrite,
+	},
+	{
+		RoleID:      ua.ObjectIDWellKnownRoleOperator,
+		Permissions: ua.PermissionTypeBrowse | ua.PermissionTypeRead | ua.PermissionTypeWrite,
+	},
+	{
+		RoleID:      ua.ObjectIDWellKnownRoleEngineer,
+		Permissions: ua.PermissionTypeBrowse | ua.PermissionTypeRead | ua.PermissionTypeWrite,
+	},
+	{
+		RoleID:      ua.ObjectIDWellKnownRoleSupervisor,
+		Permissions: ua.PermissionTypeBrowse | ua.PermissionTypeRead | ua.PermissionTypeWrite,
+	},
+}
+
+var objectRolePermissions = []ua.RolePermissionType{
+	{
+		RoleID:      ua.ObjectIDWellKnownRoleAnonymous,
+		Permissions: ua.PermissionTypeBrowse | ua.PermissionTypeRead | ua.PermissionTypeWrite | ua.PermissionTypeWriteAttribute,
+	},
+	{
+		RoleID:      ua.ObjectIDWellKnownRoleAuthenticatedUser,
+		Permissions: ua.PermissionTypeBrowse | ua.PermissionTypeRead | ua.PermissionTypeWrite | ua.PermissionTypeWriteAttribute,
+	},
+	{
+		RoleID:      ua.ObjectIDWellKnownRoleOperator,
+		Permissions: ua.PermissionTypeBrowse | ua.PermissionTypeRead | ua.PermissionTypeWrite | ua.PermissionTypeWriteAttribute,
+	},
+	{
+		RoleID:      ua.ObjectIDWellKnownRoleEngineer,
+		Permissions: ua.PermissionTypeBrowse | ua.PermissionTypeRead | ua.PermissionTypeWrite | ua.PermissionTypeWriteAttribute,
+	},
+	{
+		RoleID:      ua.ObjectIDWellKnownRoleSupervisor,
+		Permissions: ua.PermissionTypeBrowse | ua.PermissionTypeRead | ua.PermissionTypeWrite | ua.PermissionTypeWriteAttribute,
+	},
+}
+
 var uaTypes = map[reflect.Kind]ua.NodeID{
 	reflect.Bool:    ua.DataTypeIDBoolean,
 	reflect.Int8:    ua.DataTypeIDSByte,
@@ -53,6 +102,8 @@ var uaTypes = map[reflect.Kind]ua.NodeID{
 	reflect.Uint:    ua.DataTypeIDUInt64,
 }
 
+var timeType = reflect.TypeOf(time.Time{})
+
 func NewRuntimeOPCUAServer(settings ServerSettings) *RuntimeOPCUAServer {
 	return &RuntimeOPCUAServer{
 		Settings:   settings,
@@ -60,10 +111,18 @@ func NewRuntimeOPCUAServer(settings ServerSettings) *RuntimeOPCUAServer {
 	}
 }
 
+func (s *RuntimeOPCUAServer) logf(format string, args ...any) {
+	log.Printf("opcua[%d] "+format, append([]any{s.Settings.Port}, args...)...)
+}
+
 func (s *RuntimeOPCUAServer) Start() error {
+	RegisterBinaryEncodings()
+	s.logf("starting server on %s:%d", s.Settings.Host, s.Settings.Port)
+
 	keyPath := fmt.Sprintf("./pki/%d/server.key", s.Settings.Port)
 	certPath := fmt.Sprintf("./pki/%d/server.crt", s.Settings.Port)
 	if err := setupSecurity(keyPath, certPath, s.Settings.Host); err != nil {
+		s.logf("security setup failed: key=%s cert=%s err=%v", keyPath, certPath, err)
 		return err
 	}
 
@@ -88,23 +147,60 @@ func (s *RuntimeOPCUAServer) Start() error {
 		server.WithServerDiagnostics(true),
 	)
 	if err != nil {
+		s.logf("server.New failed for endpoint %s: %v", endpointURL, err)
 		return err
 	}
 
 	s.Server = srv
 	s.NameSpaceMngr = srv.NamespaceManager()
+	s.NameSpaceMngr.Add(runtimeNamespaceURI)
+
+	for _, typ := range []any{
+		SemVerType{},
+		IdentityType{},
+		BackupEnrollmentState{},
+		AnalogPointType{},
+		DigitalPointType{},
+		StageStatusType{},
+		BackendCompressorModuleType{},
+	} {
+		if err := s.EnsureTypeDefinition(typ); err != nil {
+			s.logf("type registration failed for %T: %v", typ, err)
+			return err
+		}
+	}
 
 	go func() {
 		if err := s.Server.ListenAndServe(); err != nil {
-			log.Printf("opc ua server stopped on port %d: %v", s.Settings.Port, err)
+			s.logf("server stopped: %v", err)
 		}
 	}()
 
+	s.logf("server started")
 	return nil
+}
+
+func (s *RuntimeOPCUAServer) EnsureTypeDefinition(sample any) error {
+	value := reflect.ValueOf(sample)
+	if !value.IsValid() {
+		return fmt.Errorf("invalid type sample")
+	}
+	for value.Kind() == reflect.Pointer {
+		if value.IsNil() {
+			value = reflect.Zero(value.Type().Elem())
+			break
+		}
+		value = value.Elem()
+	}
+	if value.Kind() != reflect.Struct {
+		return fmt.Errorf("type definition requires struct sample, got %s", value.Type())
+	}
+	return s.generateTypeDefs(value)
 }
 
 func (s *RuntimeOPCUAServer) Stop() {
 	if s.Server != nil {
+		s.logf("stopping server")
 		s.Server.Close()
 	}
 }
@@ -115,19 +211,24 @@ func (s *RuntimeOPCUAServer) AddFolderNode(id, name, parent string) error {
 		ua.NodeIDString{NamespaceIndex: 1, ID: id},
 		ua.QualifiedName{NamespaceIndex: 1, Name: name},
 		ua.LocalizedText{Text: name},
-		ua.LocalizedText{Text: ""},
-		nil,
+		ua.LocalizedText{Text: folderDescription(name)},
+		objectRolePermissions,
 		[]ua.Reference{
 			{ReferenceTypeID: ua.ReferenceTypeIDOrganizes, IsInverse: true, TargetID: ua.ExpandedNodeID{NodeID: ua.ParseNodeID(parent)}},
 			{ReferenceTypeID: ua.ReferenceTypeIDHasTypeDefinition, TargetID: ua.ExpandedNodeID{NodeID: ua.ParseNodeID("i=61")}},
 		},
 		0,
 	)
-	return s.NameSpaceMngr.AddNode(node)
+	if err := s.NameSpaceMngr.AddNode(node); err != nil {
+		s.logf("add folder failed: id=%s name=%s parent=%s err=%v", id, name, parent, err)
+		return err
+	}
+	s.logf("added folder: id=%s name=%s parent=%s", id, name, parent)
+	return nil
 }
 
 func (s *RuntimeOPCUAServer) AddValueNode(name, parent string, initVal any) (string, error) {
-	return s.addVariableNode(name, ua.ReferenceTypeIDOrganizes, ua.NodeIDString{NamespaceIndex: 1, ID: parent}, initVal)
+	return s.addVariableNode(qualifiedChildName(parent, name), ua.ReferenceTypeIDHasComponent, ua.NodeIDString{NamespaceIndex: 1, ID: parent}, initVal)
 }
 
 func (s *RuntimeOPCUAServer) AddStructArrayNode(name, parent string, elemSample any) (string, error) {
@@ -150,25 +251,30 @@ func (s *RuntimeOPCUAServer) AddStructArrayNode(name, parent string, elemSample 
 	id := s.nextNodeID
 	s.nextNodeID++
 	nodeID := fmt.Sprintf("ns=2;i=%d", id)
+	displayName := qualifiedChildName(parent, name)
 
 	node := server.NewVariableNode(
 		s.Server,
 		ua.NodeIDNumeric{NamespaceIndex: 2, ID: id},
-		ua.QualifiedName{NamespaceIndex: 2, Name: name},
-		ua.LocalizedText{Text: name},
-		ua.LocalizedText{Text: ""},
-		nil,
+		ua.QualifiedName{NamespaceIndex: 2, Name: displayName},
+		ua.LocalizedText{Text: displayName},
+		ua.LocalizedText{Text: variableDescription(parent, name)},
+		variableRolePermissions,
 		[]ua.Reference{
 			{
-				ReferenceTypeID: ua.ReferenceTypeIDOrganizes,
+				ReferenceTypeID: ua.ReferenceTypeIDHasComponent,
 				IsInverse:       true,
 				TargetID:        ua.ExpandedNodeID{NodeID: ua.NodeIDString{NamespaceIndex: 1, ID: parent}},
+			},
+			{
+				ReferenceTypeID: ua.ReferenceTypeIDHasTypeDefinition,
+				TargetID:        ua.ExpandedNodeID{NodeID: ua.VariableTypeIDBaseDataVariableType},
 			},
 		},
 		ua.NewDataValue([]ua.ExtensionObject{}, 0, time.Now().UTC(), 0, time.Now().UTC(), 0),
 		typeID,
 		ua.ValueRankOneDimension,
-		[]uint32{0},
+		[]uint32{2},
 		ua.AccessLevelsCurrentRead|ua.AccessLevelsCurrentWrite,
 		250.0,
 		false,
@@ -176,8 +282,10 @@ func (s *RuntimeOPCUAServer) AddStructArrayNode(name, parent string, elemSample 
 	)
 
 	if err := s.NameSpaceMngr.AddNode(node); err != nil {
+		s.logf("add struct array node failed: name=%s parent=%s type=%s err=%v", displayName, parent, typeID, err)
 		return "", err
 	}
+	s.logf("added struct array node: node=%s parent=%s type=%s rank=%d dims=%v", nodeID, parent, typeID, ua.ValueRankOneDimension, node.ArrayDimensions())
 	return nodeID, nil
 }
 
@@ -200,13 +308,17 @@ func (s *RuntimeOPCUAServer) addVariableNode(name string, refType ua.NodeID, par
 		ua.NodeIDNumeric{NamespaceIndex: 2, ID: id},
 		ua.QualifiedName{NamespaceIndex: 2, Name: name},
 		ua.LocalizedText{Text: name},
-		ua.LocalizedText{Text: ""},
-		nil,
+		ua.LocalizedText{Text: nodeDescription(name, initVal)},
+		variableRolePermissions,
 		[]ua.Reference{
 			{
 				ReferenceTypeID: refType,
 				IsInverse:       true,
 				TargetID:        ua.ExpandedNodeID{NodeID: parent},
+			},
+			{
+				ReferenceTypeID: ua.ReferenceTypeIDHasTypeDefinition,
+				TargetID:        ua.ExpandedNodeID{NodeID: ua.VariableTypeIDBaseDataVariableType},
 			},
 		},
 		ua.NewDataValue(initVal, 0, time.Now().UTC(), 0, time.Now().UTC(), 0),
@@ -220,8 +332,10 @@ func (s *RuntimeOPCUAServer) addVariableNode(name string, refType ua.NodeID, par
 	)
 
 	if err := s.NameSpaceMngr.AddNode(node); err != nil {
+		s.logf("add variable node failed: name=%s parent=%s type=%s ref=%s err=%v", name, parent, typeID, refType, err)
 		return "", err
 	}
+	s.logf("added variable node: node=%s name=%s parent=%s type=%s", nodeID, name, parent, typeID)
 	return nodeID, nil
 }
 
@@ -254,7 +368,7 @@ func (s *RuntimeOPCUAServer) AddMethodNode(id, name string, parent ua.NodeID, ha
 		nodeID,
 		ua.QualifiedName{NamespaceIndex: 2, Name: name},
 		ua.LocalizedText{Text: name},
-		ua.LocalizedText{Text: ""},
+		ua.LocalizedText{Text: fmt.Sprintf("OPC UA method %s.", name)},
 		rolePermissions,
 		[]ua.Reference{
 			{
@@ -265,10 +379,27 @@ func (s *RuntimeOPCUAServer) AddMethodNode(id, name string, parent ua.NodeID, ha
 		},
 		true,
 	)
-	node.SetCallMethodHandler(handler)
+	node.SetCallMethodHandler(func(session *server.Session, req ua.CallMethodRequest) (result ua.CallMethodResult) {
+		s.logf("method call start: id=%s input_count=%d", id, len(req.InputArguments))
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				s.logf("method call panic: id=%s panic=%v\n%s", id, recovered, debug.Stack())
+				result = ua.CallMethodResult{StatusCode: ua.BadInternalError}
+				return
+			}
+			if result.StatusCode == ua.Good {
+				s.logf("method call ok: id=%s output_count=%d", id, len(result.OutputArguments))
+				return
+			}
+			s.logf("method call failed: id=%s status=%s input_results=%v output_count=%d", id, result.StatusCode, result.InputArgumentResults, len(result.OutputArguments))
+		}()
+		return handler(session, req)
+	})
 	if err := s.NameSpaceMngr.AddNode(node); err != nil {
+		s.logf("add method failed: id=%s name=%s parent=%s err=%v", id, name, parent, err)
 		return "", err
 	}
+	s.logf("added method: id=%s name=%s parent=%s", id, name, parent)
 	return fmt.Sprintf("ns=2;s=%s", id), nil
 }
 
@@ -282,8 +413,8 @@ func (s *RuntimeOPCUAServer) AddMethodArgumentsNode(methodNodeID ua.NodeID, prop
 		ua.NodeIDNumeric{NamespaceIndex: 2, ID: id},
 		ua.QualifiedName{NamespaceIndex: 2, Name: propertyName},
 		ua.LocalizedText{Text: propertyName},
-		ua.LocalizedText{Text: ""},
-		nil,
+		ua.LocalizedText{Text: fmt.Sprintf("Method property %s.", propertyName)},
+		variableRolePermissions,
 		[]ua.Reference{
 			{
 				ReferenceTypeID: ua.ReferenceTypeIDHasProperty,
@@ -305,27 +436,42 @@ func (s *RuntimeOPCUAServer) AddMethodArgumentsNode(methodNodeID ua.NodeID, prop
 		nil,
 	)
 	if err := s.NameSpaceMngr.AddNode(node); err != nil {
+		s.logf("add method arguments failed: method=%s property=%s count=%d err=%v", methodNodeID, propertyName, len(args), err)
 		return "", err
 	}
+	s.logf("added method arguments: method=%s property=%s count=%d", methodNodeID, propertyName, len(args))
 	return nodeID, nil
 }
 
 func (s *RuntimeOPCUAServer) SetNodeValue(nodeIDStr string, newValue any) error {
 	nodeID := ua.ParseNodeID(nodeIDStr)
 	if nodeID == nil {
-		return fmt.Errorf("failed to parse node id %s", nodeIDStr)
+		err := fmt.Errorf("failed to parse node id %s", nodeIDStr)
+		s.logf("set value failed: node=%s err=%v", nodeIDStr, err)
+		return err
 	}
 	node, ok := s.NameSpaceMngr.FindVariable(nodeID)
 	if !ok {
-		return fmt.Errorf("failed to find node %s", nodeIDStr)
+		err := fmt.Errorf("failed to find node %s", nodeIDStr)
+		s.logf("set value failed: node=%s err=%v", nodeIDStr, err)
+		return err
 	}
 	node.SetValue(ua.NewDataValue(newValue, 0, time.Now().UTC(), 0, time.Now().UTC(), 0))
+	s.logf("set value: node=%s type=%T", nodeIDStr, newValue)
 	return nil
+}
+
+func qualifiedChildName(parent, name string) string {
+	return parent + "_" + name
 }
 
 func (s *RuntimeOPCUAServer) resolveTypeID(value reflect.Value) (ua.NodeID, error) {
 	if !value.IsValid() {
 		return ua.DataTypeIDBaseDataType, nil
+	}
+
+	if value.Type() == timeType {
+		return ua.DataTypeIDDateTime, nil
 	}
 
 	if id, ok := uaTypes[value.Kind()]; ok {
@@ -357,50 +503,27 @@ func (s *RuntimeOPCUAServer) resolveTypeID(value reflect.Value) (ua.NodeID, erro
 
 func (s *RuntimeOPCUAServer) generateTypeDefs(value reflect.Value) error {
 	typ := value.Type()
-	typeID := ua.NodeIDString{NamespaceIndex: 2, ID: strings.ReplaceAll(typ.String(), ".", "_")}
+	if typ == timeType {
+		return nil
+	}
+	if typ.Kind() != reflect.Struct {
+		return fmt.Errorf("generateTypeDefs requires struct type, got %s", typ)
+	}
+
+	typeName := strings.ReplaceAll(typ.String(), ".", "_")
+	typeID := ua.NodeIDString{NamespaceIndex: 2, ID: typeName}
 	if _, ok := s.NameSpaceMngr.FindNode(typeID); ok {
 		return nil
 	}
+	s.logf("generating type definition: type=%s", typ.String())
 
 	fields := make([]ua.StructureField, 0, typ.NumField())
 	for i := 0; i < typ.NumField(); i++ {
 		field := typ.Field(i)
-		fieldType := field.Type
-
-		for fieldType.Kind() == reflect.Pointer {
-			fieldType = fieldType.Elem()
-		}
-
-		var dataType ua.NodeID
-		valueRank := ua.ValueRankScalar
-
-		switch fieldType.Kind() {
-		case reflect.Struct:
-			if err := s.generateTypeDefs(reflect.Zero(fieldType)); err != nil {
-				return err
-			}
-			dataType = ua.NodeIDString{NamespaceIndex: 2, ID: strings.ReplaceAll(fieldType.String(), ".", "_")}
-		case reflect.Slice:
-			elem := fieldType.Elem()
-			if elem.Kind() == reflect.Struct {
-				if err := s.generateTypeDefs(reflect.Zero(elem)); err != nil {
-					return err
-				}
-				dataType = ua.NodeIDString{NamespaceIndex: 2, ID: strings.ReplaceAll(elem.String(), ".", "_")}
-			} else {
-				id, ok := uaTypes[elem.Kind()]
-				if !ok {
-					return fmt.Errorf("unsupported slice element type %s", elem)
-				}
-				dataType = id
-			}
-			valueRank = ua.ValueRankOneDimension
-		default:
-			id, ok := uaTypes[fieldType.Kind()]
-			if !ok {
-				return fmt.Errorf("unsupported field type %s in %s.%s", fieldType, typ.String(), field.Name)
-			}
-			dataType = id
+		dataType, valueRank, err := s.resolveFieldDefinition(field.Type)
+		if err != nil {
+			s.logf("type definition field failed: type=%s field=%s err=%v", typ.String(), field.Name, err)
+			return fmt.Errorf("unsupported field %s.%s: %w", typ.String(), field.Name, err)
 		}
 
 		fields = append(fields, ua.StructureField{
@@ -415,7 +538,7 @@ func (s *RuntimeOPCUAServer) generateTypeDefs(value reflect.Value) error {
 		typeID,
 		ua.QualifiedName{NamespaceIndex: 2, Name: typ.Name()},
 		ua.LocalizedText{Text: typ.Name()},
-		ua.LocalizedText{Text: ""},
+		ua.LocalizedText{Text: fmt.Sprintf("Custom OPC UA structure type for %s.", typ.String())},
 		nil,
 		[]ua.Reference{
 			{
@@ -426,7 +549,7 @@ func (s *RuntimeOPCUAServer) generateTypeDefs(value reflect.Value) error {
 		},
 		false,
 		ua.StructureDefinition{
-			DefaultEncodingID: ua.NodeIDString{NamespaceIndex: 2, ID: strings.ReplaceAll(typ.String(), ".", "_") + "_Enc"},
+			DefaultEncodingID: ua.NodeIDString{NamespaceIndex: 2, ID: typeName + "_Enc"},
 			BaseDataType:      ua.DataTypeIDStructure,
 			StructureType:     ua.StructureTypeStructure,
 			Fields:            fields,
@@ -434,10 +557,112 @@ func (s *RuntimeOPCUAServer) generateTypeDefs(value reflect.Value) error {
 	)
 
 	if _, ok := ua.FindBinaryEncodingIDForType(typ); !ok {
-		ua.RegisterBinaryEncodingID(typ, ua.ExpandedNodeID{NodeID: ua.NodeIDString{NamespaceIndex: 2, ID: strings.ReplaceAll(typ.String(), ".", "_") + "_Enc"}})
+		ua.RegisterBinaryEncodingID(typ, ua.ExpandedNodeID{NodeID: ua.NodeIDString{NamespaceIndex: 2, ID: typeName + "_Enc"}})
+		s.logf("registered binary encoding: type=%s encoding=%s", typ.String(), typeName+"_Enc")
 	}
 
-	return s.NameSpaceMngr.AddNode(node)
+	if err := s.NameSpaceMngr.AddNode(node); err != nil {
+		s.logf("add datatype failed: type=%s err=%v", typ.String(), err)
+		return err
+	}
+	s.logf("added datatype: type=%s node=%s", typ.String(), typeID)
+
+	return s.addBinaryEncodingNode(typeName, typeID)
+}
+
+func (s *RuntimeOPCUAServer) resolveFieldDefinition(fieldType reflect.Type) (ua.NodeID, int32, error) {
+	for fieldType.Kind() == reflect.Pointer {
+		fieldType = fieldType.Elem()
+	}
+
+	if fieldType == timeType {
+		return ua.DataTypeIDDateTime, ua.ValueRankScalar, nil
+	}
+
+	switch fieldType.Kind() {
+	case reflect.Map, reflect.Interface:
+		return nil, 0, fmt.Errorf("invalid datatype %s", fieldType)
+	case reflect.Struct:
+		if err := s.generateTypeDefs(reflect.Zero(fieldType)); err != nil {
+			return nil, 0, err
+		}
+		return ua.NodeIDString{NamespaceIndex: 2, ID: strings.ReplaceAll(fieldType.String(), ".", "_")}, ua.ValueRankScalar, nil
+	case reflect.Slice:
+		elem := fieldType.Elem()
+		for elem.Kind() == reflect.Pointer {
+			elem = elem.Elem()
+		}
+		if elem == timeType {
+			return ua.DataTypeIDDateTime, ua.ValueRankOneDimension, nil
+		}
+		if elem.Kind() == reflect.Struct {
+			if err := s.generateTypeDefs(reflect.Zero(elem)); err != nil {
+				return nil, 0, err
+			}
+			return ua.NodeIDString{NamespaceIndex: 2, ID: strings.ReplaceAll(elem.String(), ".", "_")}, ua.ValueRankOneDimension, nil
+		}
+		id, ok := uaTypes[elem.Kind()]
+		if !ok {
+			return nil, 0, fmt.Errorf("unsupported slice element type %s", elem)
+		}
+		return id, ua.ValueRankOneDimension, nil
+	default:
+		id, ok := uaTypes[fieldType.Kind()]
+		if !ok {
+			return nil, 0, fmt.Errorf("unsupported type %s", fieldType)
+		}
+		return id, ua.ValueRankScalar, nil
+	}
+}
+
+func (s *RuntimeOPCUAServer) addBinaryEncodingNode(typeName string, typeID ua.NodeID) error {
+	encodingID := ua.NodeIDString{NamespaceIndex: 2, ID: typeName + "_Enc"}
+	if _, ok := s.NameSpaceMngr.FindNode(encodingID); ok {
+		return nil
+	}
+
+	node := server.NewObjectNode(
+		s.Server,
+		encodingID,
+		ua.QualifiedName{NamespaceIndex: 2, Name: "Default Binary"},
+		ua.LocalizedText{Text: "Default Binary"},
+		ua.LocalizedText{Text: fmt.Sprintf("Default binary encoding for %s.", typeName)},
+		objectRolePermissions,
+		[]ua.Reference{
+			{
+				ReferenceTypeID: ua.ReferenceTypeIDHasEncoding,
+				IsInverse:       true,
+				TargetID:        ua.ExpandedNodeID{NodeID: typeID},
+			},
+			{
+				ReferenceTypeID: ua.ReferenceTypeIDHasTypeDefinition,
+				TargetID:        ua.ExpandedNodeID{NodeID: ua.ObjectTypeIDDataTypeEncodingType},
+			},
+		},
+		0,
+	)
+
+	if err := s.NameSpaceMngr.AddNode(node); err != nil {
+		s.logf("add binary encoding node failed: type=%s encoding=%s err=%v", typeName, encodingID, err)
+		return err
+	}
+	s.logf("added binary encoding node: type=%s encoding=%s", typeName, encodingID)
+	return nil
+}
+
+func folderDescription(name string) string {
+	return fmt.Sprintf("Folder node for %s.", name)
+}
+
+func variableDescription(parent, name string) string {
+	return fmt.Sprintf("Published variable %s under %s.", name, parent)
+}
+
+func nodeDescription(name string, value any) string {
+	if value == nil {
+		return fmt.Sprintf("Published variable %s.", name)
+	}
+	return fmt.Sprintf("Published variable %s of type %T.", name, value)
 }
 
 func setupSecurity(keyPath, certPath, hostIP string) error {

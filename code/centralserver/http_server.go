@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -28,6 +29,7 @@ type adminPageData struct {
 	Modules   []ModuleStatusView
 	Flash     string
 	ModuleMap []moduleTypeOption
+	Downloads map[string]string
 }
 
 type moduleTypeOption struct {
@@ -69,6 +71,12 @@ var adminPageTemplate = template.Must(template.New("admin").Parse(`<!DOCTYPE htm
       gap: 18px;
       grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
     }
+    .actions {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-top: 10px;
+    }
     .card {
       background: var(--panel);
       border: 1px solid var(--line);
@@ -109,6 +117,14 @@ var adminPageTemplate = template.Must(template.New("admin").Parse(`<!DOCTYPE htm
       background: var(--ink);
       color: white;
       border: none;
+    }
+    .action-link {
+      display: inline-block;
+      text-decoration: none;
+      padding: 10px 12px;
+      border-radius: 10px;
+      background: var(--ink);
+      color: white;
     }
     table {
       width: 100%;
@@ -164,6 +180,10 @@ var adminPageTemplate = template.Must(template.New("admin").Parse(`<!DOCTYPE htm
         <p>Last publish: {{index .Health.Runtime "last_publish_utc"}}</p>
         <p>General OPC UA: {{index .Health.Endpoints "opcua_general"}}</p>
         <p>SCADA OPC UA: {{index .Health.Endpoints "opcua_scada"}}</p>
+        <div class="actions">
+          <a class="action-link" href="{{index .Downloads "general"}}" download>Download General NodeSet</a>
+          <a class="action-link" href="{{index .Downloads "scada"}}" download>Download SCADA NodeSet</a>
+        </div>
       </section>
 
       <section class="card">
@@ -245,6 +265,7 @@ func (p *Process) startHTTPServer() error {
 	mux.HandleFunc("/health", p.handleHealth)
 	mux.HandleFunc("/healthz", p.handleHealth)
 	mux.HandleFunc("/admin", p.handleAdmin)
+	mux.HandleFunc("/admin/nodeset.xml", p.handleNodeSetDownload)
 	mux.HandleFunc("/admin/modules", p.handleAddModule)
 	mux.HandleFunc("/admin/modules/activate", p.handleActivateModule)
 	mux.HandleFunc("/admin/modules/deactivate", p.handleDeactivateModule)
@@ -374,12 +395,47 @@ func (p *Process) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		Modules:   p.Memory.ListModules(),
 		Flash:     r.URL.Query().Get("flash"),
 		ModuleMap: moduleTypeOptions(),
+		Downloads: map[string]string{
+			"general": "/admin/nodeset.xml?server=general",
+			"scada":   "/admin/nodeset.xml?server=scada",
+		},
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := adminPageTemplate.Execute(w, data); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
+}
+
+func (p *Process) handleNodeSetDownload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	serverName := strings.ToLower(r.URL.Query().Get("server"))
+	var runtime *RuntimeOPCUAServer
+	switch serverName {
+	case "general":
+		runtime = p.General
+	case "scada":
+		runtime = p.SCADA
+	default:
+		http.Error(w, "invalid server parameter", http.StatusBadRequest)
+		return
+	}
+	if runtime == nil {
+		http.Error(w, "server not available", http.StatusServiceUnavailable)
+		return
+	}
+	buf, err := runtime.ExportNodeSetXML()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s-nodeset.xml\"", serverName))
+	_, _ = w.Write(buf)
 }
 
 func (p *Process) handleAddModule(w http.ResponseWriter, r *http.Request) {

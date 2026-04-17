@@ -12,7 +12,7 @@ import (
 func main() {
 	process := centralserver.NewProcess(centralserver.ProcessConfig{
 		Host:        "127.0.0.1",
-		GeneralPort: 4842,
+		GeneralPort: 4840,
 		SCADAPort:   4844,
 		HTTPPort:    8080,
 		DemoMode:    true,

@@ -165,6 +165,10 @@ func (p *Process) setupGeneralNodes() error {
 		log.Printf("setup general nodes failed: folder Backend: %v", err)
 		return err
 	}
+	if err := p.General.AddFolderNode("CompressorStruct", "CompressorStruct", "ns=1;s=Backend"); err != nil {
+		log.Printf("setup general nodes failed: folder CompressorStruct: %v", err)
+		return err
+	}
 	if err := p.installMethods(); err != nil {
 		log.Printf("setup general nodes failed: install methods: %v", err)
 		return err
@@ -200,6 +204,12 @@ func (p *Process) setupGeneralNodes() error {
 		return err
 	}
 	p.generalNodes["Backend.LastUpdateUTC"] = lastUpdateNode
+	compressorStructNode, err := p.General.AddValueNode("Data", "CompressorStruct", BackendCompressorModuleType{})
+	if err != nil {
+		log.Printf("setup general nodes failed: CompressorStruct.Data: %v", err)
+		return err
+	}
+	p.generalNodes["CompressorStruct.Data"] = compressorStructNode
 
 	if err := p.General.AddFolderNode("BackupEnrollment", "BackupEnrollment", "ns=1;s=Backend"); err != nil {
 		log.Printf("setup general nodes failed: folder BackupEnrollment: %v", err)
@@ -294,7 +304,7 @@ func (p *Process) publishSnapshot() error {
 		"SupplyConnectionSkids": {count: len(general.Plant.SupplyConnectionSkids), data: general.Plant.SupplyConnectionSkids},
 	}
 	for group, value := range generalValues {
-		if err := p.General.SetNodeValue(p.generalNodes[group+".Data"], toExtensionObjectArray(value.data)); err != nil {
+		if err := p.General.SetNodeValue(p.generalNodes[group+".Data"], value.data); err != nil {
 			log.Printf("publish general group failed: %s.Data: %v", group, err)
 			return err
 		}
@@ -305,6 +315,10 @@ func (p *Process) publishSnapshot() error {
 	}
 	if err := p.General.SetNodeValue(p.generalNodes["Backend.LastUpdateUTC"], general.LastForward.Format(time.RFC3339)); err != nil {
 		log.Printf("publish general failed: Backend.LastUpdateUTC: %v", err)
+		return err
+	}
+	if err := p.General.SetNodeValue(p.generalNodes["CompressorStruct.Data"], firstBackendCompressor(general.Plant.Compressors)); err != nil {
+		log.Printf("publish general failed: CompressorStruct.Data: %v", err)
 		return err
 	}
 	backup := p.Memory.ReadBackupEnrollment()
@@ -364,7 +378,7 @@ func (p *Process) publishSnapshot() error {
 		"ControlledFunctions": {count: len(scada.ControlledFunctions), data: scada.ControlledFunctions},
 	}
 	for group, value := range scadaValues {
-		if err := p.SCADA.SetNodeValue(p.scadaNodes[group+".Data"], toExtensionObjectArray(value.data)); err != nil {
+		if err := p.SCADA.SetNodeValue(p.scadaNodes[group+".Data"], value.data); err != nil {
 			log.Printf("publish scada group failed: %s.Data: %v", group, err)
 			return err
 		}
@@ -624,4 +638,11 @@ func toExtensionObjectArray(items any) []ua.ExtensionObject {
 		result = append(result, ua.ExtensionObject(value.Index(i).Interface()))
 	}
 	return result
+}
+
+func firstBackendCompressor(compressors []BackendCompressorModuleType) BackendCompressorModuleType {
+	if len(compressors) == 0 {
+		return BackendCompressorModuleType{}
+	}
+	return compressors[0]
 }

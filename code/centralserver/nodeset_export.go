@@ -61,6 +61,13 @@ func exportNode(node server.Node, namespaceURIs []string) (ua.UANode, error) {
 		n.MinimumSamplingInterval = typed.MinimumSamplingInterval()
 		n.Historizing = typed.Historizing()
 		n.Value = exportVariant(typed.Value().Value, namespaceURIs)
+	case *server.VariableTypeNode:
+		n.XMLName = xml.Name{Local: "UAVariableType"}
+		n.DataType = nodeIDString(typed.DataType())
+		n.ValueRank = strconv.Itoa(int(typed.ValueRank()))
+		n.ArrayDimensions = exportArrayDimensions(typed.ArrayDimensions())
+		n.IsAbstract = typed.IsAbstract()
+		n.Value = exportVariant(typed.Value().Value, namespaceURIs)
 	case *server.MethodNode:
 		n.XMLName = xml.Name{Local: "UAMethod"}
 		n.Executable = strconv.FormatBool(typed.Executable())

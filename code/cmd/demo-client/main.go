@@ -13,7 +13,7 @@ import (
 )
 
 func main() {
-	endpoint := flag.String("endpoint", "opc.tcp://127.0.0.1:4842", "OPC UA endpoint")
+	endpoint := flag.String("endpoint", "opc.tcp://127.0.0.1:4840", "OPC UA endpoint")
 	root := flag.String("root", "ns=1;s=Backend", "Root folder to inspect")
 	group := flag.String("group", "Compressors", "Group folder to inspect")
 	flag.Parse()
